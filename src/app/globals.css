@@ -1,0 +1,470 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 0% 3.9%;
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 0 0% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+  }
+}
+
+
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Global form field consistency fixes */
+input,
+textarea,
+select {
+  /* Ensure consistent box model across all browsers */
+  box-sizing: border-box;
+  /* Remove default browser styling */
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  /* Prevent iOS Safari from adding extra styling */
+  -webkit-border-radius: 0.375rem;
+  -webkit-box-shadow: none;
+  box-shadow: none;
+  /* Ensure consistent width calculation */
+  width: 100%;
+  max-width: 100%;
+  /* Fix iOS Safari specific issues */
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Additional mobile device detection for landscape mode */
+@media screen and (max-width: 1024px) and (max-height: 768px) {
+
+  /* Fix button layout issues on mobile devices in landscape */
+  .flex.justify-between {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    width: 100% !important;
+    flex-wrap: nowrap !important;
+  }
+
+  .flex.justify-between button:first-child {
+    flex: 0 0 auto !important;
+    width: 129px !important;
+    max-width: 129px !important;
+  }
+
+  .flex.justify-between button:last-child {
+    flex: 0 0 auto !important;
+    width: 129px !important;
+    max-width: 129px !important;
+  }
+
+  button {
+    -webkit-appearance: none !important;
+    -webkit-border-radius: 0.375rem !important;
+    border-radius: 0.375rem !important;
+    box-sizing: border-box !important;
+    flex-shrink: 0 !important;
+    -webkit-box-shadow: none !important;
+    box-shadow: none !important;
+  }
+}
+
+/* Universal mobile device button fixes - covers all mobile scenarios */
+@media screen and (max-width: 1024px) and (max-height: 1024px) {
+
+  /* This covers most mobile devices in both orientations */
+  .flex.justify-between button:first-child,
+  .flex.justify-between button:last-child {
+    flex: 0 0 auto !important;
+    width: 129px !important;
+    max-width: 129px !important;
+    min-width: 129px !important;
+  }
+
+  .flex.justify-between {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    width: 100% !important;
+    flex-wrap: nowrap !important;
+    gap: 0 !important;
+  }
+}
+
+/* iOS Tablet device fixes */
+@media screen and (min-width: 768px) and (max-width: 1366px) {
+
+  /* This covers iPad and other tablets */
+  .flex.justify-between {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    width: 100% !important;
+    flex-wrap: nowrap !important;
+  }
+
+  .flex.justify-between button:first-child,
+  .flex.justify-between button:last-child {
+    flex: 0 0 auto !important;
+    width: 129px !important;
+    max-width: 129px !important;
+    min-width: 129px !important;
+  }
+
+  button {
+    -webkit-appearance: none !important;
+    -webkit-border-radius: 0.375rem !important;
+    border-radius: 0.375rem !important;
+    box-sizing: border-box !important;
+    flex-shrink: 0 !important;
+    -webkit-box-shadow: none !important;
+    box-shadow: none !important;
+  }
+}
+
+/* Additional tablet landscape fixes */
+@media screen and (min-width: 1024px) and (max-width: 1366px) and (orientation: landscape) {
+
+  .flex.justify-between button:first-child,
+  .flex.justify-between button:last-child {
+    flex: 0 0 auto !important;
+    width: 129px !important;
+    max-width: 129px !important;
+    min-width: 129px !important;
+  }
+
+  .flex.justify-between {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    width: 100% !important;
+    flex-wrap: nowrap !important;
+  }
+}
+
+/* Comprehensive tablet and touch device fixes */
+@media screen and (min-width: 768px) and (max-width: 1920px) and (pointer: coarse) {
+
+  /* This targets touch devices (tablets) with larger screens */
+  .flex.justify-between {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    width: 100% !important;
+    flex-wrap: nowrap !important;
+  }
+
+  .flex.justify-between button:first-child,
+  .flex.justify-between button:last-child {
+    flex: 0 0 auto !important;
+    width: 129px !important;
+    max-width: 129px !important;
+    min-width: 129px !important;
+  }
+
+  button {
+    -webkit-appearance: none !important;
+    -webkit-border-radius: 0.375rem !important;
+    border-radius: 0.375rem !important;
+    box-sizing: border-box !important;
+    flex-shrink: 0 !important;
+    -webkit-box-shadow: none !important;
+    box-shadow: none !important;
+  }
+}
+
+/* Specific fixes for iOS Safari input width issues */
+@supports (-webkit-touch-callout: none) {
+
+  /* This targets iOS Safari specifically */
+  input,
+  textarea,
+  select {
+    /* Force consistent width calculation on iOS */
+    width: 100% !important;
+    max-width: 100% !important;
+    /* Ensure border-box sizing is respected */
+    box-sizing: border-box !important;
+    /* Remove any iOS-specific styling that might affect width */
+    -webkit-appearance: none !important;
+    -webkit-border-radius: 0.375rem !important;
+    border-radius: 0.375rem !important;
+    /* Prevent iOS from adding extra padding or margins */
+    margin: 0 !important;
+    /* Ensure consistent border handling */
+    border: 1px solid hsl(var(--input)) !important;
+  }
+
+  /* Fix for border-inputBorder class specifically */
+  .border-inputBorder {
+    border: 1px solid #949494 !important;
+    /* Ensure consistent width on iOS */
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+  }
+
+  /* iOS Safari button layout fixes */
+  button {
+    /* Ensure consistent button behavior on iOS */
+    -webkit-appearance: none !important;
+    -webkit-border-radius: 0.375rem !important;
+    border-radius: 0.375rem !important;
+    box-sizing: border-box !important;
+    /* Fix flex behavior on iOS */
+    flex-shrink: 0 !important;
+    /* Prevent iOS from adding extra styling */
+    -webkit-box-shadow: none !important;
+    box-shadow: none !important;
+  }
+
+  /* Fix flexbox containers on iOS */
+  .flex {
+    display: flex !important;
+  }
+
+  .justify-between {
+    justify-content: space-between !important;
+  }
+
+  /* Ensure button containers work properly on iOS */
+  .flex.justify-between {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    width: 100% !important;
+    flex-wrap: nowrap !important;
+  }
+
+  /* Additional iOS tablet fixes */
+  @media screen and (min-width: 768px) {
+
+    .flex.justify-between button:first-child,
+    .flex.justify-between button:last-child {
+      flex: 0 0 auto !important;
+      width: 129px !important;
+      max-width: 129px !important;
+      min-width: 129px !important;
+    }
+  }
+}
+
+/* Prevent iOS zoom on input focus and fix width issues */
+@media screen and (max-width: 768px),
+screen and (max-height: 500px) and (orientation: landscape),
+screen and (max-width: 1024px) and (max-height: 768px) and (orientation: landscape) {
+
+  input[type="text"],
+  input[type="email"],
+  input[type="tel"],
+  input[type="password"],
+  input[type="number"],
+  input[type="date"],
+  textarea,
+  select {
+    font-size: 16px !important;
+    /* Fix iOS Safari input width issues */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    box-sizing: border-box;
+    width: 100% !important;
+    max-width: 100% !important;
+    /* Ensure consistent border and padding */
+    border-radius: 0.375rem;
+    border: 1px solid hsl(var(--input));
+    /* Prevent iOS from adding extra styling */
+    -webkit-border-radius: 0.375rem;
+    -webkit-box-shadow: none;
+    box-shadow: none;
+  }
+
+  /* Specific fixes for different input types */
+  input[type="text"],
+  input[type="email"],
+  input[type="tel"],
+  input[type="password"],
+  input[type="number"] {
+    /* Remove iOS default styling */
+    -webkit-appearance: none;
+    -webkit-border-radius: 0.375rem;
+    border-radius: 0.375rem;
+    /* Ensure consistent sizing */
+    height: 2.5rem;
+    padding: 0.5rem 0.75rem;
+    /* Fix width calculation */
+    box-sizing: border-box;
+    width: 100%;
+  }
+
+  input[type="date"] {
+    /* Date inputs need special handling on iOS */
+    -webkit-appearance: none;
+    -webkit-border-radius: 0.375rem;
+    border-radius: 0.375rem;
+    height: 2.5rem;
+    padding: 0.5rem 0.75rem;
+    box-sizing: border-box;
+    width: 100%;
+  }
+
+  textarea {
+    /* Ensure textarea has consistent width */
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 5rem;
+    padding: 0.5rem 0.75rem;
+    -webkit-appearance: none;
+    -webkit-border-radius: 0.375rem;
+    border-radius: 0.375rem;
+  }
+
+  select {
+    /* Select elements need special handling */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    box-sizing: border-box;
+    width: 100%;
+    height: 2.5rem;
+    padding: 0.5rem 0.75rem;
+    -webkit-border-radius: 0.375rem;
+    border-radius: 0.375rem;
+  }
+
+  /* Fix button layout issues on iOS mobile */
+  button {
+    /* Ensure consistent button sizing on iOS */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    box-sizing: border-box;
+    /* Prevent iOS from adding extra styling */
+    -webkit-border-radius: 0.375rem;
+    -webkit-box-shadow: none;
+    box-shadow: none;
+    /* Fix touch interactions */
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Fix flexbox button container issues on iOS */
+  .flex.justify-between {
+    /* Ensure proper flex behavior on iOS */
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    width: 100% !important;
+    /* Prevent iOS from collapsing flex items */
+    flex-wrap: nowrap !important;
+  }
+
+  /* Ensure buttons maintain their width on iOS */
+  button[class*="w-["] {
+    /* Force button width to be respected on iOS */
+    flex-shrink: 0 !important;
+    min-width: 0 !important;
+  }
+
+  /* Specific fix for Previous/Next button pairs */
+  .flex.justify-between button:first-child {
+    /* Ensure Previous button doesn't expand */
+    flex: 0 0 auto !important;
+    width: 129px !important;
+    max-width: 129px !important;
+  }
+
+  .flex.justify-between button:last-child {
+    /* Ensure Next button doesn't expand */
+    flex: 0 0 auto !important;
+    width: 129px !important;
+    max-width: 129px !important;
+  }
+}
+
+#date_time_picker {
+  -webkit-appearance: none;
+  /* Safari */
+  -moz-appearance: none;
+  /* Firefox */
+  appearance: none;
+}
+
+.custom-box-shadow {
+  box-shadow: 0px 0px 0px 0px #00000000,
+    0px 0px 0px 0px #00000000,
+    0px 10px 15px -3px #0000001A,
+    0px 4px 6px -4px #0000001A;
+  ;
+}
