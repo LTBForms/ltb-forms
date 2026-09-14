@@ -1,7 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import fs from 'fs';
-import path from 'path';
+import { NextRequest, NextResponse } from "next/server";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import Stripe from "stripe";
+import fs from "fs";
+import path from "path";
 import {
   PDFField,
   PDFTextField,
@@ -11,33 +12,79 @@ import {
   PDFOptionList,
   PDFButton,
   PDFSignature,
-} from 'pdf-lib';
+} from "pdf-lib";
 
-function getFieldType(field: PDFField):
-  | 'text'
-  | 'checkbox'
-  | 'radio'
-  | 'dropdown'
-  | 'optionlist'
-  | 'button'
-  | 'signature'
-  | 'unknown' {
-  if (field instanceof PDFTextField) return 'text';
-  if (field instanceof PDFCheckBox) return 'checkbox';
-  if (field instanceof PDFRadioGroup) return 'radio';
-  if (field instanceof PDFDropdown) return 'dropdown';
-  if (field instanceof PDFOptionList) return 'optionlist';
-  if (field instanceof PDFButton) return 'button';
-  if (field instanceof PDFSignature) return 'signature';
-  return 'unknown';
+function getFieldType(
+  field: PDFField,
+):
+  | "text"
+  | "checkbox"
+  | "radio"
+  | "dropdown"
+  | "optionlist"
+  | "button"
+  | "signature"
+  | "unknown" {
+  if (field instanceof PDFTextField) return "text";
+  if (field instanceof PDFCheckBox) return "checkbox";
+  if (field instanceof PDFRadioGroup) return "radio";
+  if (field instanceof PDFDropdown) return "dropdown";
+  if (field instanceof PDFOptionList) return "optionlist";
+  if (field instanceof PDFButton) return "button";
+  if (field instanceof PDFSignature) return "signature";
+  return "unknown";
+}
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: "2025-08-27.basil",
+});
+
+/** Confirms the caller paid the form fee for this form before we hand over bytes. */
+async function assertPaidFor(
+  formId: string,
+  sessionId?: string,
+): Promise<string | null> {
+  if (!sessionId) return "Missing payment session";
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.payment_status !== "paid") return "Payment not completed";
+    if (session.metadata?.formId !== formId)
+      return "Payment is for a different form";
+    if ((session.metadata?.purpose ?? "form-access") !== "form-access") {
+      return "Payment is not a form purchase";
+    }
+    /* No DB, so the download counter lives on the PaymentIntent's metadata.
+       Generous limit: reprints and retries are legitimate, resale is not. */
+    const MAX_FILLS = 5;
+    const intentId =
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent?.id;
+
+    if (intentId) {
+      const intent = await stripe.paymentIntents.retrieve(intentId);
+      const fills = parseInt(intent.metadata?.fills ?? "0", 10) || 0;
+      if (fills >= MAX_FILLS) {
+        return "This form has already been downloaded the maximum number of times";
+      }
+      await stripe.paymentIntents.update(intentId, {
+        metadata: { ...intent.metadata, fills: String(fills + 1) },
+      });
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Stripe session lookup failed:", error);
+    return "Could not verify payment";
+  }
 }
 
 // Helper function to convert ISO date (YYYY-MM-DD) to dd/mm/yyyy format
 function formatDateToDDMMYYYY(dateString: string): string {
-  if (!dateString) return '';
+  if (!dateString) return "";
   const date = new Date(dateString);
-  const day = date.getDate().toString().padStart(2, '0');
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
+  const day = date.getDate().toString().padStart(2, "0");
+  const month = (date.getMonth() + 1).toString().padStart(2, "0");
   const year = date.getFullYear();
   return `${day}/${month}/${year}`;
 }
@@ -46,9 +93,20 @@ export async function POST(request: NextRequest) {
   try {
     // Parse the request body to get form data
     const formData = await request.json();
-    console.log('Received form data:', formData);
+    console.log("Received form data:", formData);
+
+    const paymentError = await assertPaidFor("n4", formData.paidSessionId);
+    if (paymentError) {
+      console.warn(`Blocked unpaid N4 fill: ${paymentError}`);
+      return NextResponse.json({ error: paymentError }, { status: 402 });
+    }
     // Load the N4 PDF
-    const pdfPath = path.join(process.cwd(), 'public', 'templates', 'N4_Acro.pdf');
+    const pdfPath = path.join(
+      process.cwd(),
+      "public",
+      "templates",
+      "N4_Acro.pdf",
+    );
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
 
@@ -57,148 +115,236 @@ export async function POST(request: NextRequest) {
     const fields = form.getFields();
     let filledCount = 0;
 
-    fields.forEach(field => {
+    fields.forEach((field) => {
       const fieldName = field.getName();
       // const fieldType = field.constructor.name;
       const fieldType = getFieldType(field);
       console.log(`📝 Field: ${fieldName} | Type: ${fieldType}`);
 
-      if (fieldType === 'text') {
+      if (fieldType === "text") {
         console.log("Processing PDFTextField...");
 
         try {
-
           // Use exact matching instead of includes to avoid false positives
-          if (fieldName.includes('form1[0].#subform[1].Notice_Name_and_Address[0].TO_TenameName[0]')) {
+          if (
+            fieldName.includes(
+              "form1[0].#subform[1].Notice_Name_and_Address[0].TO_TenameName[0]",
+            )
+          ) {
             console.log("✅ Filling TENANT NAME field");
             // Handle tenantNames as either array or comma-separated string
             const tenantNames = Array.isArray(formData.tenantNames)
-              ? formData.tenantNames.join(', ')
-              : formData.tenantNames || '';
+              ? formData.tenantNames.join(", ")
+              : formData.tenantNames || "";
             (field as any).setText(tenantNames);
-          } else if (fieldName == 'form1[0].#subform[1].Notice_Name_and_Address[0].From_LandlordName[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[1].Notice_Name_and_Address[0].From_LandlordName[0]"
+          ) {
             console.log("✅ Filling LANDLORD NAME field");
-            (field as any).setText(formData.landlordName || '');
-          } else if (fieldName == 'form1[0].#subform[1].Notice_Name_and_Address[0].RentalUnitAddress[0]') {
+            (field as any).setText(formData.landlordName || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[1].Notice_Name_and_Address[0].RentalUnitAddress[0]"
+          ) {
             console.log("✅ Filling RENTAL ADDRESS field");
-            (field as any).setText(formData.rentalAddress || '');
-          } else if (fieldName == 'form1[0].#subform[1].PayDate[0]') {
+            (field as any).setText(formData.rentalAddress || "");
+          } else if (fieldName == "form1[0].#subform[1].PayDate[0]") {
             console.log("✅ Filling TERMINATION DATE field");
             (field as any).setText(formData.terminationDate || "");
           }
 
           // Rental Period 1 fields - Using form data
-          else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].ArrearFrom1[0]') {
+          else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].ArrearFrom1[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 1 FROM DATE");
             if (formData.rentalPeriods?.[0]?.fromDate) {
-              (field as any).setText(formData.rentalPeriods[0].fromDate || '');
+              (field as any).setText(formData.rentalPeriods[0].fromDate || "");
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].ArrearTo1[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].ArrearTo1[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 1 TO DATE");
             if (formData.rentalPeriods?.[0]?.toDate) {
               (field as any).setText(formData.rentalPeriods[0].toDate);
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].RentCharge1[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].RentCharge1[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 1 RENT CHARGE");
             try {
               if (formData.rentalPeriods?.[0]?.lawfulRent) {
-                const amount = parseFloat(formData.rentalPeriods[0].lawfulRent) || 0;
-                (field as any).setText(amount.toFixed(2).padStart(9, ' '));
+                const amount =
+                  parseFloat(formData.rentalPeriods[0].lawfulRent) || 0;
+                (field as any).setText(amount.toFixed(2).padStart(9, " "));
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 1 RENT CHARGE: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 1 RENT CHARGE': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 1 RENT CHARGE: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 1 RENT CHARGE': ${error}`,
+              );
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].RentPaid1[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].RentPaid1[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 1 RENT PAID");
             try {
               if (formData.rentalPeriods?.[0]?.paidRent) {
-                const amount = parseFloat(formData.rentalPeriods[0].paidRent) || 0;
-                (field as any).setText(amount.toFixed(2).padStart(9, ' '));
+                const amount =
+                  parseFloat(formData.rentalPeriods[0].paidRent) || 0;
+                (field as any).setText(amount.toFixed(2).padStart(9, " "));
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 1 RENT PAID: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 1 RENT PAID': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 1 RENT PAID: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 1 RENT PAID': ${error}`,
+              );
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].RentOwe1[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row1[0].RentOwe1[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 1 RENT OWING");
             try {
-              if (formData.rentalPeriods?.[0]?.lawfulRent && formData.rentalPeriods?.[0]?.paidRent) {
-                const lawfulRent = parseFloat(formData.rentalPeriods[0].lawfulRent) || 0;
-                const paidRent = parseFloat(formData.rentalPeriods[0].paidRent) || 0;
+              if (
+                formData.rentalPeriods?.[0]?.lawfulRent &&
+                formData.rentalPeriods?.[0]?.paidRent
+              ) {
+                const lawfulRent =
+                  parseFloat(formData.rentalPeriods[0].lawfulRent) || 0;
+                const paidRent =
+                  parseFloat(formData.rentalPeriods[0].paidRent) || 0;
                 const owing = (lawfulRent - paidRent).toFixed(2);
-                (field as any).setText(owing.padStart(10, ' '));
+                (field as any).setText(owing.padStart(10, " "));
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 1 RENT OWING: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 1 RENT OWING': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 1 RENT OWING: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 1 RENT OWING': ${error}`,
+              );
             }
           }
 
           // Rental Period 2 fields - Using form data
-          else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].ArrearFrom2[0]') {
+          else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].ArrearFrom2[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 2 FROM DATE");
             if (formData.rentalPeriods?.[1]?.fromDate) {
               (field as any).setText(formData.rentalPeriods[1].fromDate);
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].ArrearTo2[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].ArrearTo2[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 2 TO DATE");
             if (formData.rentalPeriods?.[1]?.toDate) {
               (field as any).setText(formData.rentalPeriods[1].toDate);
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].RentCharge2[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].RentCharge2[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 2 RENT CHARGE");
             try {
               if (formData.rentalPeriods?.[1]?.lawfulRent) {
-                const amount = parseFloat(formData.rentalPeriods[1].lawfulRent) || 0;
-                (field as any).setText(amount.toFixed(2).padStart(9, ' '));
+                const amount =
+                  parseFloat(formData.rentalPeriods[1].lawfulRent) || 0;
+                (field as any).setText(amount.toFixed(2).padStart(9, " "));
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 2 RENT CHARGE: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 2 RENT CHARGE': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 2 RENT CHARGE: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 2 RENT CHARGE': ${error}`,
+              );
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].RentPaid2[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].RentPaid2[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 2 RENT PAID");
             try {
               if (formData.rentalPeriods?.[1]?.paidRent) {
-                const amount = parseFloat(formData.rentalPeriods[1].paidRent) || 0;
-                (field as any).setText(amount.toFixed(2).padStart(9, ' '));
+                const amount =
+                  parseFloat(formData.rentalPeriods[1].paidRent) || 0;
+                (field as any).setText(amount.toFixed(2).padStart(9, " "));
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 2 RENT PAID: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 2 RENT PAID': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 2 RENT PAID: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 2 RENT PAID': ${error}`,
+              );
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].RentOwe2[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row2[0].RentOwe2[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 2 RENT OWING");
             try {
-              if (formData.rentalPeriods?.[1]?.lawfulRent && formData.rentalPeriods?.[1]?.paidRent) {
-                const lawfulRent = parseFloat(formData.rentalPeriods[1].lawfulRent) || 0;
-                const paidRent = parseFloat(formData.rentalPeriods[1].paidRent) || 0;
+              if (
+                formData.rentalPeriods?.[1]?.lawfulRent &&
+                formData.rentalPeriods?.[1]?.paidRent
+              ) {
+                const lawfulRent =
+                  parseFloat(formData.rentalPeriods[1].lawfulRent) || 0;
+                const paidRent =
+                  parseFloat(formData.rentalPeriods[1].paidRent) || 0;
                 const owing = (lawfulRent - paidRent).toFixed(2);
-                (field as any).setText(owing.padStart(10, ' '));
+                (field as any).setText(owing.padStart(10, " "));
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 2 RENT OWING: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 2 RENT OWING': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 2 RENT OWING: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 2 RENT OWING': ${error}`,
+              );
             }
           }
 
           // Rental Period 3 fields - Using form data (aggregated for periods 3+)
-          else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].ArrearFrom3[0]') {
+          else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].ArrearFrom3[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 3 FROM DATE");
             if (formData.rentalPeriods?.[2]?.fromDate) {
               (field as any).setText(formData.rentalPeriods[2].fromDate);
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].ArrearTo3[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].ArrearTo3[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 3 TO DATE");
             // Use the end date of the last rental period if there are more than 3 periods
             if (formData.rentalPeriods && formData.rentalPeriods.length > 2) {
               const lastPeriodIndex = formData.rentalPeriods.length - 1;
               if (formData.rentalPeriods[lastPeriodIndex]?.toDate) {
-                (field as any).setText(formData.rentalPeriods[lastPeriodIndex].toDate);
+                (field as any).setText(
+                  formData.rentalPeriods[lastPeriodIndex].toDate,
+                );
               }
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].RentCharge3[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].RentCharge3[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 3 RENT CHARGE");
             try {
               // Sum all lawful rent from period 3 onwards
@@ -206,19 +352,27 @@ export async function POST(request: NextRequest) {
                 let totalLawfulRent = 0;
                 for (let i = 2; i < formData.rentalPeriods.length; i++) {
                   if (formData.rentalPeriods[i]?.lawfulRent) {
-                    totalLawfulRent += parseFloat(formData.rentalPeriods[i].lawfulRent) || 0;
+                    totalLawfulRent +=
+                      parseFloat(formData.rentalPeriods[i].lawfulRent) || 0;
                   }
                 }
                 if (totalLawfulRent > 0) {
                   const amount = totalLawfulRent.toFixed(2);
-                  (field as any).setText(amount.padStart(9, ' '));
+                  (field as any).setText(amount.padStart(9, " "));
                 }
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 3 RENT CHARGE: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 3 RENT CHARGE': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 3 RENT CHARGE: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 3 RENT CHARGE': ${error}`,
+              );
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].RentPaid3[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].RentPaid3[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 3 RENT PAID");
             try {
               // Sum all paid rent from period 3 onwards
@@ -226,17 +380,25 @@ export async function POST(request: NextRequest) {
                 let totalPaidRent = 0;
                 for (let i = 2; i < formData.rentalPeriods.length; i++) {
                   if (formData.rentalPeriods[i]?.paidRent) {
-                    totalPaidRent += parseFloat(formData.rentalPeriods[i].paidRent) || 0;
+                    totalPaidRent +=
+                      parseFloat(formData.rentalPeriods[i].paidRent) || 0;
                   }
                 }
                 const amount = totalPaidRent.toFixed(2);
-                (field as any).setText(amount.padStart(9, ' '));
+                (field as any).setText(amount.padStart(9, " "));
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 3 RENT PAID: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 3 RENT PAID': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 3 RENT PAID: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 3 RENT PAID': ${error}`,
+              );
             }
-          } else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].RentOwe3[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].Table1[0].Row3[0].RentOwe3[0]"
+          ) {
             console.log("✅ Filling RENTAL PERIOD 3 RENT OWING");
             try {
               // Calculate total owing from period 3 onwards
@@ -245,23 +407,32 @@ export async function POST(request: NextRequest) {
                 let totalPaidRent = 0;
                 for (let i = 2; i < formData.rentalPeriods.length; i++) {
                   if (formData.rentalPeriods[i]?.lawfulRent) {
-                    totalLawfulRent += parseFloat(formData.rentalPeriods[i].lawfulRent) || 0;
+                    totalLawfulRent +=
+                      parseFloat(formData.rentalPeriods[i].lawfulRent) || 0;
                   }
                   if (formData.rentalPeriods[i]?.paidRent) {
-                    totalPaidRent += parseFloat(formData.rentalPeriods[i].paidRent) || 0;
+                    totalPaidRent +=
+                      parseFloat(formData.rentalPeriods[i].paidRent) || 0;
                   }
                 }
                 const owing = (totalLawfulRent - totalPaidRent).toFixed(2);
-                (field as any).setText(owing.padStart(10, ' '));
+                (field as any).setText(owing.padStart(10, " "));
               }
             } catch (error) {
-              console.error(`❌ Error filling RENTAL PERIOD 3 RENT OWING: ${error}`);
-              throw new Error(`Failed to fill field 'RENTAL PERIOD 3 RENT OWING': ${error}`);
+              console.error(
+                `❌ Error filling RENTAL PERIOD 3 RENT OWING: ${error}`,
+              );
+              throw new Error(
+                `Failed to fill field 'RENTAL PERIOD 3 RENT OWING': ${error}`,
+              );
             }
           }
 
           // Total Rent Owing - Using form data
-          else if (fieldName == 'form1[0].#subform[4].LTHAS_Arrear_L1[0].TotalRentOwe[0]') {
+          else if (
+            fieldName ==
+            "form1[0].#subform[4].LTHAS_Arrear_L1[0].TotalRentOwe[0]"
+          ) {
             console.log("✅ Filling TOTAL RENT OWING");
             try {
               // Calculate total owing from all periods
@@ -270,23 +441,27 @@ export async function POST(request: NextRequest) {
                 let totalPaidRent = 0;
                 for (let i = 0; i < formData.rentalPeriods.length; i++) {
                   if (formData.rentalPeriods[i]?.lawfulRent) {
-                    totalLawfulRent += parseFloat(formData.rentalPeriods[i].lawfulRent) || 0;
+                    totalLawfulRent +=
+                      parseFloat(formData.rentalPeriods[i].lawfulRent) || 0;
                   }
                   if (formData.rentalPeriods[i]?.paidRent) {
-                    totalPaidRent += parseFloat(formData.rentalPeriods[i].paidRent) || 0;
+                    totalPaidRent +=
+                      parseFloat(formData.rentalPeriods[i].paidRent) || 0;
                   }
                 }
                 const totalOwing = (totalLawfulRent - totalPaidRent).toFixed(2);
-                (field as any).setText(totalOwing.padStart(11, ' '));
+                (field as any).setText(totalOwing.padStart(11, " "));
               }
             } catch (error) {
               console.error(`❌ Error filling TOTAL RENT OWING: ${error}`);
-              throw new Error(`Failed to fill field 'TOTAL RENT OWING': ${error}`);
+              throw new Error(
+                `Failed to fill field 'TOTAL RENT OWING': ${error}`,
+              );
             }
           }
 
           // Main Amount Owed - Using form data
-          else if (fieldName == 'form1[0].#subform[1].OweMeAmount[0]') {
+          else if (fieldName == "form1[0].#subform[1].OweMeAmount[0]") {
             console.log("✅ Filling MAIN AMOUNT OWED");
             try {
               // Calculate total owing from all periods
@@ -295,106 +470,180 @@ export async function POST(request: NextRequest) {
                 let totalPaidRent = 0;
                 for (let i = 0; i < formData.rentalPeriods.length; i++) {
                   if (formData.rentalPeriods[i]?.lawfulRent) {
-                    totalLawfulRent += parseFloat(formData.rentalPeriods[i].lawfulRent) || 0;
+                    totalLawfulRent +=
+                      parseFloat(formData.rentalPeriods[i].lawfulRent) || 0;
                   }
                   if (formData.rentalPeriods[i]?.paidRent) {
-                    totalPaidRent += parseFloat(formData.rentalPeriods[i].paidRent) || 0;
+                    totalPaidRent +=
+                      parseFloat(formData.rentalPeriods[i].paidRent) || 0;
                   }
                 }
                 const totalOwing = (totalLawfulRent - totalPaidRent).toFixed(2);
-                (field as any).setText(totalOwing.padStart(10, ' '));
+                (field as any).setText(totalOwing.padStart(10, " "));
               }
             } catch (error) {
               console.error(`❌ Error filling MAIN AMOUNT OWED: ${error}`);
-              throw new Error(`Failed to fill field 'MAIN AMOUNT OWED': ${error}`);
+              throw new Error(
+                `Failed to fill field 'MAIN AMOUNT OWED': ${error}`,
+              );
             }
           }
 
           // Signature fields
-          else if (fieldName == 'form1[0].#subform[4].Signature_for_Notice[0].RFirstName[0]') {
-            if (formData.whoAreYou === 'landlord') {
+          else if (
+            fieldName ==
+            "form1[0].#subform[4].Signature_for_Notice[0].RFirstName[0]"
+          ) {
+            if (formData.whoAreYou === "landlord") {
               console.log("✅ Filling FIRST NAME SIGNATURE LANDLORD");
-              (field as any).setText(formData.landlordName?.split(' ')[0] || '');
+              (field as any).setText(
+                formData.landlordName?.split(" ")[0] || "",
+              );
             } else {
-              formData.landlordName[0]
+              formData.landlordName[0];
               console.log("✅ Filling FIRST NAME SIGNATURE REPRESENTATIVE");
-              (field as any).setText(formData.representativeName?.split(' ')[0] || '');
+              (field as any).setText(
+                formData.representativeName?.split(" ")[0] || "",
+              );
             }
-          } else if (fieldName == 'form1[0].#subform[4].Signature_for_Notice[0].RLastName[0]') {
-            if (formData.whoAreYou === 'landlord') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Signature_for_Notice[0].RLastName[0]"
+          ) {
+            if (formData.whoAreYou === "landlord") {
               console.log("✅ Filling LAST NAME SIGNATURE LANDLORD");
-              (field as any).setText(formData.landlordName?.split(' ').slice(1).join(' ') || '');
+              (field as any).setText(
+                formData.landlordName?.split(" ").slice(1).join(" ") || "",
+              );
             } else {
-              formData.landlordName[0]
+              formData.landlordName[0];
               console.log("✅ Filling LAST NAME SIGNATURE REPRESENTATIVE");
-              (field as any).setText(formData.representativeName?.split(' ').slice(1).join(' ') || '');
+              (field as any).setText(
+                formData.representativeName?.split(" ").slice(1).join(" ") ||
+                  "",
+              );
             }
-          } else if (fieldName == 'form1[0].#subform[4].Signature_for_Notice[0].RDayPhone[0]') {
-            if(formData.whoAreYou === "landlord"){
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Signature_for_Notice[0].RDayPhone[0]"
+          ) {
+            if (formData.whoAreYou === "landlord") {
               console.log("✅ Filling LANDLORD PHONE NUMBER SIGNATURE");
-            (field as any).setText(formData.landlordPhoneNumber || '');
+              (field as any).setText(formData.landlordPhoneNumber || "");
             } else {
               console.log("✅ Filling REPRESENTATIVE PHONE NUMBER SIGNATURE");
-            (field as any).setText(formData.representativePhoneNumber || '');
+              (field as any).setText(formData.representativePhoneNumber || "");
             }
-          } else if (fieldName == 'form1[0].#subform[3].Signature_for_Notice_N4[0].Signature[0]') {
+          } else if (
+            fieldName ==
+            "form1[0].#subform[3].Signature_for_Notice_N4[0].Signature[0]"
+          ) {
             console.log("✅ Filling SIGNATURE");
-            (field as any).setText(formData.representativeName || 'Signature');
-          } else if (fieldName == 'form1[0].#subform[3].Signature_for_Notice_N4[0].SignDate[0]') {
+            (field as any).setText(formData.representativeName || "Signature");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[3].Signature_for_Notice_N4[0].SignDate[0]"
+          ) {
             console.log("✅ Filling SIGNATURE DATE");
-            (field as any).setText(formData.serveDate || new Date().toLocaleDateString('en-GB'));
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentName[0]') {
+            (field as any).setText(
+              formData.serveDate || new Date().toLocaleDateString("en-GB"),
+            );
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentName[0]"
+          ) {
             console.log("✅ Filling AGENT NAME");
-            (field as any).setText(formData.representativeName || '');
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentLSUC[0]') {
+            (field as any).setText(formData.representativeName || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentLSUC[0]"
+          ) {
             console.log("✅ Filling AGENT LSUC");
-            (field as any).setText(formData.lsucNumber || '');
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentCompany[0]') {
+            (field as any).setText(formData.lsucNumber || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentCompany[0]"
+          ) {
             console.log("✅ Filling AGENT COMPANY");
-            (field as any).setText(formData.companyName || '');
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentAddress[0]') {
+            (field as any).setText(formData.companyName || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentAddress[0]"
+          ) {
             console.log("✅ Filling AGENT ADDRESS");
-            (field as any).setText(formData.mailingAddress || '');
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentPhoneNum[0]') {
+            (field as any).setText(formData.mailingAddress || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentPhoneNum[0]"
+          ) {
             console.log("✅ Filling REPRESENTATIVE PHONE NUMBER");
-            (field as any).setText(formData.representativePhoneNumber || '');
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentMunicipality[0]') {
+            (field as any).setText(formData.representativePhoneNumber || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentMunicipality[0]"
+          ) {
             console.log("✅ Filling AGENT MUNICIPALITY");
-            (field as any).setText(formData.municipality || '');
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentProvince[0]') {
+            (field as any).setText(formData.municipality || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentProvince[0]"
+          ) {
             console.log("✅ Filling AGENT PROVINCE");
-            (field as any).setText(formData.province || '');
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentPostCode[0]') {
+            (field as any).setText(formData.province || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentPostCode[0]"
+          ) {
             console.log("✅ Filling AGENT POST CODE");
-            (field as any).setText(formData.postalCode || '');
-          } else if (fieldName == 'form1[0].#subform[4].Agent_Information_for_Notice[0].AgentFaxNum[0]') {
+            (field as any).setText(formData.postalCode || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Agent_Information_for_Notice[0].AgentFaxNum[0]"
+          ) {
             console.log("✅ Filling AGENT FAX NUMBER");
-            (field as any).setText(formData.faxNumber || '');
-          } else if (fieldName == 'form1[0].#subform[4].Signature_for_Notice[0].Signature[0]' && formData.whoAreYou === 'landlord') {
-              console.log("✅ Filling SIGNATURE");
-              console.log("✅ Filling SIGNATURE LANDLORD: ", formData.landlordName, formData.landlordName[0]);
-              const signature = `${formData.landlordName[0]} ${formData.landlordName?.split(' ').slice(1).join(' ')[0] || ""}`;
-              (field as any).setText(signature || '');
-          } else if (fieldName == 'form1[0].#subform[4].Signature_for_Notice[0].Signature[0]' && formData.whoAreYou === 'legal') {
-              console.log("✅ Filling SIGNATURE");
-              console.log("✅ Filling SIGNATURE LEGAL REPRESENTATIVE: ", formData.representativeName, formData.representativeName[0]);
-              const signature = `${formData.representativeName[0]} ${formData.representativeName?.split(' ').slice(1).join(' ')[0] || ""}`;
-              (field as any).setText(signature || '');
-          } else if (fieldName == 'form1[0].#subform[4].Signature_for_Notice[0].SignDate[0]') {
+            (field as any).setText(formData.faxNumber || "");
+          } else if (
+            fieldName ==
+              "form1[0].#subform[4].Signature_for_Notice[0].Signature[0]" &&
+            formData.whoAreYou === "landlord"
+          ) {
+            console.log("✅ Filling SIGNATURE");
+            console.log(
+              "✅ Filling SIGNATURE LANDLORD: ",
+              formData.landlordName,
+              formData.landlordName[0],
+            );
+            const signature = `${formData.landlordName[0]} ${formData.landlordName?.split(" ").slice(1).join(" ")[0] || ""}`;
+            (field as any).setText(signature || "");
+          } else if (
+            fieldName ==
+              "form1[0].#subform[4].Signature_for_Notice[0].Signature[0]" &&
+            formData.whoAreYou === "legal"
+          ) {
+            console.log("✅ Filling SIGNATURE");
+            console.log(
+              "✅ Filling SIGNATURE LEGAL REPRESENTATIVE: ",
+              formData.representativeName,
+              formData.representativeName[0],
+            );
+            const signature = `${formData.representativeName[0]} ${formData.representativeName?.split(" ").slice(1).join(" ")[0] || ""}`;
+            (field as any).setText(signature || "");
+          } else if (
+            fieldName ==
+            "form1[0].#subform[4].Signature_for_Notice[0].SignDate[0]"
+          ) {
             console.log("✅ Filling SERVER DATE");
-            (field as any).setText(formData.serveDate || '');
-          }
-          else {
+            (field as any).setText(formData.serveDate || "");
+          } else {
             // Log any fields that don't match our expected field names
             console.log(`❌ UNMATCHED FIELD: ${fieldName}`);
           }
 
-
           // // Special handling for amount fields - set right alignment
-          // if (fieldName.toLowerCase().includes('amount') || 
-          //     fieldName.toLowerCase().includes('rent') || 
-          //     fieldName.toLowerCase().includes('charge') || 
-          //     fieldName.toLowerCase().includes('paid') || 
+          // if (fieldName.toLowerCase().includes('amount') ||
+          //     fieldName.toLowerCase().includes('rent') ||
+          //     fieldName.toLowerCase().includes('charge') ||
+          //     fieldName.toLowerCase().includes('paid') ||
           //     fieldName.toLowerCase().includes('owe')) {
           //   try {
           //     // Try to set right alignment for amount fields
@@ -426,8 +675,7 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      
-      if (fieldType === 'radio') {
+      if (fieldType === "radio") {
         // const data = {
         //   'form1[0].#subform[4].SelectSign[0]': formData.whoAreYou === 'legal' ? '2' : '1'
         // }
@@ -456,12 +704,18 @@ export async function POST(request: NextRequest) {
         //     console.log(`Could not select radio option for ${fieldName}`);
         //   }
         // }
-        if(fieldName == 'form1[0].#subform[4].SelectSign[0]' && formData.whoAreYou === 'legal') {
+        if (
+          fieldName == "form1[0].#subform[4].SelectSign[0]" &&
+          formData.whoAreYou === "legal"
+        ) {
           console.log("✅ Filling SIGNATURE");
-          (field as any).select('2');
-        } else if(fieldName == 'form1[0].#subform[4].SelectSign[0]' && formData.whoAreYou === 'landlord') {
+          (field as any).select("2");
+        } else if (
+          fieldName == "form1[0].#subform[4].SelectSign[0]" &&
+          formData.whoAreYou === "landlord"
+        ) {
           console.log("✅ Filling SIGNATURE");
-          (field as any).select('1');
+          (field as any).select("1");
         }
         filledCount++;
       }
@@ -471,10 +725,10 @@ export async function POST(request: NextRequest) {
       //   try {
       //     if (fieldType === 'PDFTextField') {
       //       // Special handling for amount fields - set right alignment
-      //       if (fieldName.toLowerCase().includes('amount') || 
-      //           fieldName.toLowerCase().includes('rent') || 
-      //           fieldName.toLowerCase().includes('charge') || 
-      //           fieldName.toLowerCase().includes('paid') || 
+      //       if (fieldName.toLowerCase().includes('amount') ||
+      //           fieldName.toLowerCase().includes('rent') ||
+      //           fieldName.toLowerCase().includes('charge') ||
+      //           fieldName.toLowerCase().includes('paid') ||
       //           fieldName.toLowerCase().includes('owe')) {
       //         try {
       //           // Try to set right alignment for amount fields
@@ -609,7 +863,7 @@ export async function POST(request: NextRequest) {
       //   } catch (error) {
       //     console.log(`Could not fill unmapped field ${fieldName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       //   }
-      // }     
+      // }
     });
 
     // console.log(`=== PROCESSING N4_Acro.pdf ===`);
@@ -701,7 +955,6 @@ export async function POST(request: NextRequest) {
     //   const fieldName = field.getName();
     //   const fieldType = field.constructor.name;
 
-
     //   // Skip phone fields - we'll handle them separately at the end
     //   if (fieldName.toLowerCase().includes('phone') || fieldName.toLowerCase().includes('fax')) {
     //     return;
@@ -712,10 +965,10 @@ export async function POST(request: NextRequest) {
     //     try {
     //       if (fieldType === 'PDFTextField') {
     //         // Special handling for amount fields - set right alignment
-    //         if (fieldName.toLowerCase().includes('amount') || 
-    //             fieldName.toLowerCase().includes('rent') || 
-    //             fieldName.toLowerCase().includes('charge') || 
-    //             fieldName.toLowerCase().includes('paid') || 
+    //         if (fieldName.toLowerCase().includes('amount') ||
+    //             fieldName.toLowerCase().includes('rent') ||
+    //             fieldName.toLowerCase().includes('charge') ||
+    //             fieldName.toLowerCase().includes('paid') ||
     //             fieldName.toLowerCase().includes('owe')) {
     //           try {
     //             // Try to set right alignment for amount fields
@@ -942,8 +1195,8 @@ export async function POST(request: NextRequest) {
 
     // Handle phone fields with special formatting
     // console.log(`=== FILLING PHONE FIELDS ===`);
-    // const phoneFields = fields.filter(field => 
-    //   field.getName().toLowerCase().includes('phone') || 
+    // const phoneFields = fields.filter(field =>
+    //   field.getName().toLowerCase().includes('phone') ||
     //   field.getName().toLowerCase().includes('fax')
     // );
 
@@ -1012,7 +1265,10 @@ export async function POST(request: NextRequest) {
     // pdfDoc.getForm().flatten();
 
     // Helper function to calculate rent owing
-    const calculateRentOwing = (lawfulRent: string, paidRent: string): number => {
+    const calculateRentOwing = (
+      lawfulRent: string,
+      paidRent: string,
+    ): number => {
       const lawful = parseFloat(lawfulRent) || 0;
       const paid = parseFloat(paidRent) || 0;
       return Math.max(0, lawful - paid);
@@ -1021,21 +1277,28 @@ export async function POST(request: NextRequest) {
     // Add a new page at the end with rental period details
     // Set to true to include "All Rental Periods Details" page at end of PDF
     const ENABLE_RENTAL_PERIODS_PAGE = false;
-    const rentalPeriodsToDisplay = formData.allRentalPeriods || formData.rentalPeriods || [];
-    if (ENABLE_RENTAL_PERIODS_PAGE && rentalPeriodsToDisplay && rentalPeriodsToDisplay.length > 0) {
+    const rentalPeriodsToDisplay =
+      formData.allRentalPeriods || formData.rentalPeriods || [];
+    if (
+      ENABLE_RENTAL_PERIODS_PAGE &&
+      rentalPeriodsToDisplay &&
+      rentalPeriodsToDisplay.length > 0
+    ) {
       const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-      const helveticaBoldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-      
+      const helveticaBoldFont = await pdfDoc.embedFont(
+        StandardFonts.HelveticaBold,
+      );
+
       // Black color for all text
       const blackColor = rgb(0, 0, 0);
-      
+
       // Add a new page at the end of the PDF
       let currentPage = pdfDoc.addPage([612, 792]); // Standard US Letter size (8.5" x 11")
-      
+
       // Page dimensions
       const pageWidth = 612;
       const pageHeight = 792;
-      
+
       // Column widths (optimized for better spacing and centering)
       const rentPeriodColWidth = 250; // Combined From and To dates
       const fromDateColWidth = 125;
@@ -1043,28 +1306,36 @@ export async function POST(request: NextRequest) {
       const rentChargedColWidth = 115;
       const rentPaidColWidth = 115;
       const rentOwingColWidth = 115;
-      
+
       // Calculate total table width
-      const tableWidth = rentPeriodColWidth + rentChargedColWidth + rentPaidColWidth + rentOwingColWidth; // = 595
-      
+      const tableWidth =
+        rentPeriodColWidth +
+        rentChargedColWidth +
+        rentPaidColWidth +
+        rentOwingColWidth; // = 595
+
       // Calculate centered table margins (equal spacing from both sides)
       const margin = (pageWidth - tableWidth) / 2; // Equal margins on both sides
-      
+
       // Column X positions (centered)
       const fromDateX = margin;
       const toDateX = margin + fromDateColWidth;
       const rentChargedX = margin + rentPeriodColWidth;
       const rentPaidX = margin + rentPeriodColWidth + rentChargedColWidth;
-      const rentOwingX = margin + rentPeriodColWidth + rentChargedColWidth + rentPaidColWidth;
-      
+      const rentOwingX =
+        margin + rentPeriodColWidth + rentChargedColWidth + rentPaidColWidth;
+
       let yPosition = 750; // Start position
       const rowHeight = 25; // Height of each row
       const headerHeight = 30; // Slightly taller header for sub-headers
-      
+
       // Draw title "All Rental Periods Details" centered at the top
-      const titleText = 'All Rental Periods Details';
+      const titleText = "All Rental Periods Details";
       const titleSize = 14;
-      const titleWidth = helveticaBoldFont.widthOfTextAtSize(titleText, titleSize);
+      const titleWidth = helveticaBoldFont.widthOfTextAtSize(
+        titleText,
+        titleSize,
+      );
       currentPage.drawText(titleText, {
         x: (pageWidth - titleWidth) / 2,
         y: yPosition,
@@ -1072,12 +1343,21 @@ export async function POST(request: NextRequest) {
         font: helveticaBoldFont,
         color: blackColor,
       });
-      
+
       yPosition -= 40; // Space after title
-      
+
       // Helper function to draw a rectangle (cell border)
       // skipTop, skipBottom, skipLeft, skipRight allow selective border drawing
-      const drawCellBorder = (x: number, y: number, width: number, height: number, skipTop: boolean = false, skipBottom: boolean = false, skipLeft: boolean = false, skipRight: boolean = false) => {
+      const drawCellBorder = (
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        skipTop: boolean = false,
+        skipBottom: boolean = false,
+        skipLeft: boolean = false,
+        skipRight: boolean = false,
+      ) => {
         // Top line
         if (!skipTop) {
           currentPage.drawLine({
@@ -1115,16 +1395,28 @@ export async function POST(request: NextRequest) {
           });
         }
       };
-      
+
       // Draw header row
       const headerY = yPosition;
-      
+
       // Draw header cells with borders
       // "Rent Period" header cell (spans From and To columns)
       // Skip right border to avoid double line
-      drawCellBorder(fromDateX, headerY, rentPeriodColWidth, headerHeight, false, false, false, true);
-      const rentPeriodText = 'Rent Period';
-      const rentPeriodTextWidth = helveticaBoldFont.widthOfTextAtSize(rentPeriodText, 10);
+      drawCellBorder(
+        fromDateX,
+        headerY,
+        rentPeriodColWidth,
+        headerHeight,
+        false,
+        false,
+        false,
+        true,
+      );
+      const rentPeriodText = "Rent Period";
+      const rentPeriodTextWidth = helveticaBoldFont.widthOfTextAtSize(
+        rentPeriodText,
+        10,
+      );
       currentPage.drawText(rentPeriodText, {
         x: fromDateX + (rentPeriodColWidth - rentPeriodTextWidth) / 2,
         y: headerY - 10,
@@ -1132,9 +1424,9 @@ export async function POST(request: NextRequest) {
         font: helveticaBoldFont,
         color: blackColor,
       });
-      
+
       // Sub-headers for From and To (centered in their respective columns)
-      const fromText = 'From: (dd/mm/yyyy)';
+      const fromText = "From: (dd/mm/yyyy)";
       const fromTextWidth = helveticaFont.widthOfTextAtSize(fromText, 8);
       currentPage.drawText(fromText, {
         x: fromDateX + (fromDateColWidth - fromTextWidth) / 2,
@@ -1143,7 +1435,7 @@ export async function POST(request: NextRequest) {
         font: helveticaFont,
         color: blackColor,
       });
-      const toText = 'To: (dd/mm/yyyy)';
+      const toText = "To: (dd/mm/yyyy)";
       const toTextWidth = helveticaFont.widthOfTextAtSize(toText, 8);
       currentPage.drawText(toText, {
         x: toDateX + (toDateColWidth - toTextWidth) / 2,
@@ -1152,12 +1444,24 @@ export async function POST(request: NextRequest) {
         font: helveticaFont,
         color: blackColor,
       });
-      
+
       // "Rent Charged $" header
       // Skip right border to avoid double line
-      drawCellBorder(rentChargedX, headerY, rentChargedColWidth, headerHeight, false, false, false, true);
-      const rentChargedText = 'Rent Charged $';
-      const rentChargedTextWidth = helveticaBoldFont.widthOfTextAtSize(rentChargedText, 10);
+      drawCellBorder(
+        rentChargedX,
+        headerY,
+        rentChargedColWidth,
+        headerHeight,
+        false,
+        false,
+        false,
+        true,
+      );
+      const rentChargedText = "Rent Charged $";
+      const rentChargedTextWidth = helveticaBoldFont.widthOfTextAtSize(
+        rentChargedText,
+        10,
+      );
       currentPage.drawText(rentChargedText, {
         x: rentChargedX + (rentChargedColWidth - rentChargedTextWidth) / 2,
         y: headerY - 18,
@@ -1165,12 +1469,24 @@ export async function POST(request: NextRequest) {
         font: helveticaBoldFont,
         color: blackColor,
       });
-      
+
       // "Rent Paid $" header
       // Skip right border to avoid double line
-      drawCellBorder(rentPaidX, headerY, rentPaidColWidth, headerHeight, false, false, false, true);
-      const rentPaidText = 'Rent Paid $';
-      const rentPaidTextWidth = helveticaBoldFont.widthOfTextAtSize(rentPaidText, 10);
+      drawCellBorder(
+        rentPaidX,
+        headerY,
+        rentPaidColWidth,
+        headerHeight,
+        false,
+        false,
+        false,
+        true,
+      );
+      const rentPaidText = "Rent Paid $";
+      const rentPaidTextWidth = helveticaBoldFont.widthOfTextAtSize(
+        rentPaidText,
+        10,
+      );
       currentPage.drawText(rentPaidText, {
         x: rentPaidX + (rentPaidColWidth - rentPaidTextWidth) / 2,
         y: headerY - 18,
@@ -1178,11 +1494,14 @@ export async function POST(request: NextRequest) {
         font: helveticaBoldFont,
         color: blackColor,
       });
-      
+
       // "Rent Owing $" header
       drawCellBorder(rentOwingX, headerY, rentOwingColWidth, headerHeight);
-      const rentOwingText = 'Rent Owing $';
-      const rentOwingTextWidth = helveticaBoldFont.widthOfTextAtSize(rentOwingText, 10);
+      const rentOwingText = "Rent Owing $";
+      const rentOwingTextWidth = helveticaBoldFont.widthOfTextAtSize(
+        rentOwingText,
+        10,
+      );
       currentPage.drawText(rentOwingText, {
         x: rentOwingX + (rentOwingColWidth - rentOwingTextWidth) / 2,
         y: headerY - 18,
@@ -1190,13 +1509,13 @@ export async function POST(request: NextRequest) {
         font: helveticaBoldFont,
         color: blackColor,
       });
-      
+
       yPosition -= headerHeight;
-      
+
       // Store starting Y position for outer table border
       const tableTopY = headerY;
       let tableBottomY = yPosition; // Will be updated after all rows are drawn
-      
+
       // Draw data rows
       rentalPeriodsToDisplay.forEach((period: any) => {
         // Check if we need a new page (leave space for total row)
@@ -1204,11 +1523,14 @@ export async function POST(request: NextRequest) {
           // Add a new page at the end
           currentPage = pdfDoc.addPage([612, 792]);
           yPosition = 750;
-          
+
           // Redraw title
-          const titleText = 'All Rental Periods Details';
+          const titleText = "All Rental Periods Details";
           const titleSize = 14;
-          const titleWidth = helveticaBoldFont.widthOfTextAtSize(titleText, titleSize);
+          const titleWidth = helveticaBoldFont.widthOfTextAtSize(
+            titleText,
+            titleSize,
+          );
           currentPage.drawText(titleText, {
             x: (pageWidth - titleWidth) / 2,
             y: yPosition,
@@ -1217,11 +1539,23 @@ export async function POST(request: NextRequest) {
             color: blackColor,
           });
           yPosition -= 40;
-          
+
           // Redraw headers on new page
-          drawCellBorder(fromDateX, yPosition, rentPeriodColWidth, headerHeight, false, false, false, true);
-          const rentPeriodText2 = 'Rent Period';
-          const rentPeriodTextWidth2 = helveticaBoldFont.widthOfTextAtSize(rentPeriodText2, 10);
+          drawCellBorder(
+            fromDateX,
+            yPosition,
+            rentPeriodColWidth,
+            headerHeight,
+            false,
+            false,
+            false,
+            true,
+          );
+          const rentPeriodText2 = "Rent Period";
+          const rentPeriodTextWidth2 = helveticaBoldFont.widthOfTextAtSize(
+            rentPeriodText2,
+            10,
+          );
           currentPage.drawText(rentPeriodText2, {
             x: fromDateX + (rentPeriodColWidth - rentPeriodTextWidth2) / 2,
             y: yPosition - 10,
@@ -1229,7 +1563,7 @@ export async function POST(request: NextRequest) {
             font: helveticaBoldFont,
             color: blackColor,
           });
-          const fromText2 = 'From: (dd/mm/yyyy)';
+          const fromText2 = "From: (dd/mm/yyyy)";
           const fromTextWidth2 = helveticaFont.widthOfTextAtSize(fromText2, 8);
           currentPage.drawText(fromText2, {
             x: fromDateX + (fromDateColWidth - fromTextWidth2) / 2,
@@ -1238,7 +1572,7 @@ export async function POST(request: NextRequest) {
             font: helveticaFont,
             color: blackColor,
           });
-          const toText2 = 'To: (dd/mm/yyyy)';
+          const toText2 = "To: (dd/mm/yyyy)";
           const toTextWidth2 = helveticaFont.widthOfTextAtSize(toText2, 8);
           currentPage.drawText(toText2, {
             x: toDateX + (toDateColWidth - toTextWidth2) / 2,
@@ -1247,9 +1581,21 @@ export async function POST(request: NextRequest) {
             font: helveticaFont,
             color: blackColor,
           });
-          drawCellBorder(rentChargedX, yPosition, rentChargedColWidth, headerHeight, false, false, false, true);
-          const rentChargedText2 = 'Rent Charged $';
-          const rentChargedTextWidth2 = helveticaBoldFont.widthOfTextAtSize(rentChargedText2, 10);
+          drawCellBorder(
+            rentChargedX,
+            yPosition,
+            rentChargedColWidth,
+            headerHeight,
+            false,
+            false,
+            false,
+            true,
+          );
+          const rentChargedText2 = "Rent Charged $";
+          const rentChargedTextWidth2 = helveticaBoldFont.widthOfTextAtSize(
+            rentChargedText2,
+            10,
+          );
           currentPage.drawText(rentChargedText2, {
             x: rentChargedX + (rentChargedColWidth - rentChargedTextWidth2) / 2,
             y: yPosition - 18,
@@ -1257,9 +1603,21 @@ export async function POST(request: NextRequest) {
             font: helveticaBoldFont,
             color: blackColor,
           });
-          drawCellBorder(rentPaidX, yPosition, rentPaidColWidth, headerHeight, false, false, false, true);
-          const rentPaidText2 = 'Rent Paid $';
-          const rentPaidTextWidth2 = helveticaBoldFont.widthOfTextAtSize(rentPaidText2, 10);
+          drawCellBorder(
+            rentPaidX,
+            yPosition,
+            rentPaidColWidth,
+            headerHeight,
+            false,
+            false,
+            false,
+            true,
+          );
+          const rentPaidText2 = "Rent Paid $";
+          const rentPaidTextWidth2 = helveticaBoldFont.widthOfTextAtSize(
+            rentPaidText2,
+            10,
+          );
           currentPage.drawText(rentPaidText2, {
             x: rentPaidX + (rentPaidColWidth - rentPaidTextWidth2) / 2,
             y: yPosition - 18,
@@ -1267,9 +1625,17 @@ export async function POST(request: NextRequest) {
             font: helveticaBoldFont,
             color: blackColor,
           });
-          drawCellBorder(rentOwingX, yPosition, rentOwingColWidth, headerHeight);
-          const rentOwingText2 = 'Rent Owing $';
-          const rentOwingTextWidth2 = helveticaBoldFont.widthOfTextAtSize(rentOwingText2, 10);
+          drawCellBorder(
+            rentOwingX,
+            yPosition,
+            rentOwingColWidth,
+            headerHeight,
+          );
+          const rentOwingText2 = "Rent Owing $";
+          const rentOwingTextWidth2 = helveticaBoldFont.widthOfTextAtSize(
+            rentOwingText2,
+            10,
+          );
           currentPage.drawText(rentOwingText2, {
             x: rentOwingX + (rentOwingColWidth - rentOwingTextWidth2) / 2,
             y: yPosition - 18,
@@ -1279,35 +1645,53 @@ export async function POST(request: NextRequest) {
           });
           yPosition -= headerHeight;
         }
-        
+
         const rowY = yPosition;
-        
+
         // Draw cell borders for data row
         // From date cell (left-aligned)
         drawCellBorder(fromDateX, rowY, fromDateColWidth, rowHeight);
-        currentPage.drawText(period.fromDate || '-', {
+        currentPage.drawText(period.fromDate || "-", {
           x: fromDateX + 5,
           y: rowY - 18,
           size: 9,
           font: helveticaFont,
           color: blackColor,
         });
-        
+
         // To date cell (left-aligned)
         // Skip left border to avoid double line with From date column
-        drawCellBorder(toDateX, rowY, toDateColWidth, rowHeight, false, false, true, false);
-        currentPage.drawText(period.toDate || '-', {
+        drawCellBorder(
+          toDateX,
+          rowY,
+          toDateColWidth,
+          rowHeight,
+          false,
+          false,
+          true,
+          false,
+        );
+        currentPage.drawText(period.toDate || "-", {
           x: toDateX + 5,
           y: rowY - 18,
           size: 9,
           font: helveticaFont,
           color: blackColor,
         });
-        
+
         // Rent Charged cell (right-aligned numbers)
         // Skip right border to avoid double line with Rent Paid column
-        drawCellBorder(rentChargedX, rowY, rentChargedColWidth, rowHeight, false, false, false, true);
-        const rentCharged = parseFloat(period.lawfulRent || '0').toFixed(2);
+        drawCellBorder(
+          rentChargedX,
+          rowY,
+          rentChargedColWidth,
+          rowHeight,
+          false,
+          false,
+          false,
+          true,
+        );
+        const rentCharged = parseFloat(period.lawfulRent || "0").toFixed(2);
         const chargedWidth = helveticaFont.widthOfTextAtSize(rentCharged, 9);
         currentPage.drawText(rentCharged, {
           x: rentChargedX + rentChargedColWidth - chargedWidth - 5,
@@ -1316,11 +1700,20 @@ export async function POST(request: NextRequest) {
           font: helveticaFont,
           color: blackColor,
         });
-        
+
         // Rent Paid cell (right-aligned numbers)
         // Skip right border to avoid double line with Rent Owing column
-        drawCellBorder(rentPaidX, rowY, rentPaidColWidth, rowHeight, false, false, false, true);
-        const rentPaid = parseFloat(period.paidRent || '0').toFixed(2);
+        drawCellBorder(
+          rentPaidX,
+          rowY,
+          rentPaidColWidth,
+          rowHeight,
+          false,
+          false,
+          false,
+          true,
+        );
+        const rentPaid = parseFloat(period.paidRent || "0").toFixed(2);
         const paidWidth = helveticaFont.widthOfTextAtSize(rentPaid, 9);
         currentPage.drawText(rentPaid, {
           x: rentPaidX + rentPaidColWidth - paidWidth - 5,
@@ -1329,11 +1722,14 @@ export async function POST(request: NextRequest) {
           font: helveticaFont,
           color: blackColor,
         });
-        
+
         // Rent Owing cell (right-aligned numbers)
         // This cell's left border serves as the divider from Rent Paid
         drawCellBorder(rentOwingX, rowY, rentOwingColWidth, rowHeight);
-        const rentOwing = calculateRentOwing(period.lawfulRent || '0', period.paidRent || '0').toFixed(2);
+        const rentOwing = calculateRentOwing(
+          period.lawfulRent || "0",
+          period.paidRent || "0",
+        ).toFixed(2);
         const owingWidth = helveticaFont.widthOfTextAtSize(rentOwing, 9);
         currentPage.drawText(rentOwing, {
           x: rentOwingX + rentOwingColWidth - owingWidth - 5,
@@ -1342,34 +1738,47 @@ export async function POST(request: NextRequest) {
           font: helveticaFont,
           color: blackColor,
         });
-        
+
         yPosition -= rowHeight;
       });
-      
+
       // Draw total row - inside the table border (as part of the table structure)
       // Calculate total rent owing
-      const totalRentOwing = rentalPeriodsToDisplay.reduce((sum: number, period: any) => 
-        sum + calculateRentOwing(period.lawfulRent || '0', period.paidRent || '0'), 0
+      const totalRentOwing = rentalPeriodsToDisplay.reduce(
+        (sum: number, period: any) =>
+          sum +
+          calculateRentOwing(period.lawfulRent || "0", period.paidRent || "0"),
+        0,
       );
-      
+
       const totalY = yPosition;
       const totalRowHeight = rowHeight;
-      
+
       // Draw empty cell for Rent Period column only
       // Skip right border since it will connect with the merged total cell
-      drawCellBorder(fromDateX, totalY, rentPeriodColWidth, totalRowHeight, false, false, false, true); // Empty Rent Period cell
-      
+      drawCellBorder(
+        fromDateX,
+        totalY,
+        rentPeriodColWidth,
+        totalRowHeight,
+        false,
+        false,
+        false,
+        true,
+      ); // Empty Rent Period cell
+
       // Draw merged "Total Rent Owing $" cell - spans Rent Charged, Rent Paid, and Rent Owing columns
       // No vertical lines inside this merged cell - it's one continuous cell
       const totalCellStartX = rentChargedX;
-      const totalCellWidth = rentChargedColWidth + rentPaidColWidth + rentOwingColWidth; // Span all three columns
+      const totalCellWidth =
+        rentChargedColWidth + rentPaidColWidth + rentOwingColWidth; // Span all three columns
       // Draw full border for the merged cell - this creates one cell without internal dividers
       drawCellBorder(totalCellStartX, totalY, totalCellWidth, totalRowHeight);
-      
+
       // Draw "Total Rent Owing $" label and value in the same cell
-      const labelText = 'Total Rent Owing $';
+      const labelText = "Total Rent Owing $";
       const valueText = totalRentOwing.toFixed(2);
-      
+
       // Draw label (left-aligned in the cell)
       currentPage.drawText(labelText, {
         x: totalCellStartX + 5,
@@ -1378,7 +1787,7 @@ export async function POST(request: NextRequest) {
         font: helveticaBoldFont,
         color: blackColor,
       });
-      
+
       // Draw value (right-aligned in the cell)
       const valueWidth = helveticaBoldFont.widthOfTextAtSize(valueText, 10);
       currentPage.drawText(valueText, {
@@ -1388,10 +1797,10 @@ export async function POST(request: NextRequest) {
         font: helveticaBoldFont,
         color: blackColor,
       });
-      
+
       // Update table bottom Y position
       tableBottomY = totalY - totalRowHeight;
-      
+
       // Draw outer table border around the entire table
       const outerBorderThickness = 1;
       // Top border
@@ -1430,17 +1839,20 @@ export async function POST(request: NextRequest) {
     // Return the PDF as a response
     return new NextResponse(filledPdfBytes as any, {
       headers: {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': 'attachment; filename="N4.pdf"',
-        'Content-Length': filledPdfBytes.length.toString(),
+        "Content-Type": "application/pdf",
+        "Content-Disposition": 'attachment; filename="N4.pdf"',
+        "Content-Length": filledPdfBytes.length.toString(),
       },
     });
-
   } catch (error) {
-    console.error('Error filling N4 PDF:', error);
+    console.error("Error filling N4 PDF:", error);
     return NextResponse.json(
-      { error: 'Failed to fill N4 PDF: ' + (error instanceof Error ? error.message : 'Unknown error') },
-      { status: 500 }
+      {
+        error:
+          "Failed to fill N4 PDF: " +
+          (error instanceof Error ? error.message : "Unknown error"),
+      },
+      { status: 500 },
     );
   }
 }

@@ -209,9 +209,9 @@ const PHONE_HREF = "tel:+19059265898";
 const ROUTES = {
   home: "/",
   n4: "/n4",
-  n5: "/n5",
-  n8: "/n8",
-  n12: "/n12",
+  n5: "/contact-us",
+  n8: "/contact-us",
+  n12: "/contact-us",
   contact: "/contact-us",
 };
 

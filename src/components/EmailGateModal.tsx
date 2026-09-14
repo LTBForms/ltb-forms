@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -47,7 +46,7 @@ type Props = {
 
 export default function EmailGateModal({ target, onClose }: Props) {
   const open = target !== null;
-  const router = useRouter();
+
   const { toast } = useToast();
   const [isLoading, setIsLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -103,7 +102,7 @@ export default function EmailGateModal({ target, onClose }: Props) {
     try {
       sessionStorage.setItem(GATE_EMAIL_KEY, email);
 
-      /* Non-blocking: a failed lead capture should never trap the visitor. */
+      /* Lead capture (DB + mail). Non-blocking: never trap the visitor. */
       try {
         await fetch(LEAD_ENDPOINT, {
           method: "POST",
@@ -115,22 +114,40 @@ export default function EmailGateModal({ target, onClose }: Props) {
           }),
         });
       } catch (leadError) {
-        console.warn("Lead capture failed, continuing to form:", leadError);
+        console.warn("Lead capture failed, continuing to checkout:", leadError);
       }
 
-      router.push(target.href);
-      onClose();
+      /* Pay for the form first — the form itself unlocks after checkout. */
+      const res = await fetch("/api/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          formId: target.formId,
+          purpose: "form-access",
+          customerEmail: email,
+          successUrl: `${window.location.origin}${target.href}?paid=true&session_id={CHECKOUT_SESSION_ID}`,
+          cancelUrl: `${window.location.origin}/?checkout=cancelled&formId=${target.formId}`,
+        }),
+      });
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload?.url) {
+        throw new Error(
+          payload?.error || "We couldn't start checkout. Please try again.",
+        );
+      }
+
+      window.location.href = payload.url;
     } catch (error) {
-      console.error("Error starting form:", error);
+      console.error("Error starting checkout:", error);
       toast({
         title: "Error",
         description:
           error instanceof Error
             ? error.message
-            : "We couldn't open the form. Please try again.",
+            : "We couldn't start checkout. Please try again.",
         variant: "destructive",
       });
-    } finally {
       setIsLoading(false);
     }
   };
@@ -183,8 +200,9 @@ export default function EmailGateModal({ target, onClose }: Props) {
         {target.subtitle && <p className="ltbm__sub">{target.subtitle}</p>}
 
         <p className="ltbm__body">
-          Enter your email so we can send your completed form and save your
-          progress if you step away.
+          Enter your email, then complete payment. Your form opens right after
+          checkout and we'll send your receipt and completed PDF to this
+          address.
         </p>
 
         <form onSubmit={handleSubmit(onSubmit)} noValidate>
@@ -219,12 +237,13 @@ export default function EmailGateModal({ target, onClose }: Props) {
             className="ltbm__submit"
             disabled={!isValid || isLoading}
           >
-            {isLoading ? "Processing..." : "Continue"}
+            {isLoading ? "Redirecting to checkout..." : "Continue to payment"}
           </button>
         </form>
 
         <p className="ltbm__note">
-          We use your email for your form and your receipt. No spam.
+          Secure payment by Stripe. We use your email for your form and receipt
+          only. No spam.
         </p>
       </div>
     </div>
